@@ -1,195 +1,136 @@
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <windows.h>
+
+
+#include<iostream>
+#include<vector>
 using namespace std;
+vector<string>nameVec;
+vector<int>priceVec;
+vector<int>quantVec;
 
-class Bill{
-private:
- string Item;
- int Rate, Quantity;
-public:
- Bill():Item(""), Rate(0), Quantity(0){ }
  
- void setItem(string item){
- Item = item;
- }
+
  
-void setRate(int rate){
- Rate = rate;
+
+void addFun(){
+	string name; int price,quant;
+	cout<<"Enter item Name: ";
+	cin>>name;
+	cout<<"Enter Price of item: ";
+	cin>>price;
+	cout<<"Enter Quantity of Item: ";
+	cin>>quant;
+	nameVec.push_back(name);
+	priceVec.push_back(price);
+	quantVec.push_back(quant);
+	cout<<"Item Added Successfuly!"<<endl;
 }
 
-void setQuant(int quant){
- Quantity = quant;
+void purchaseFun(){
+ int total=0;
+ vector<string>itemPur;
+ vector<int>pricePur;
+ vector<int>quantPur;
+ vector<int>amountPur;
+
+ while(true){
+ 	int choice;
+ 	cout<<"Enter 1 to continue or 0 to exit: ";
+ 	cin>>choice;
+ 	if(choice==0){
+ 		break;
+	 }
+	 string item; int quant;
+	cout<<"Enter Item: ";
+	cin>>item;
+	cout<<"Enter Quantity: ";
+	cin>>quant;
+
+	bool found=false; 
+	bool quantFound=false;
+
+	for(int i=0;i<nameVec.size();i++){
+		if(item==nameVec[i]){
+			found=true;
+		 if(quant<=quantVec[i]){
+		 	quantFound=true;
+		 	quantVec[i]-=quant;
+		 	int amount= priceVec[i] * quant;
+		 	total += amount;
+		 	itemPur.push_back(item);
+		 	pricePur.push_back(priceVec[i]);
+		 	amountPur.push_back(amount);
+		 	quantPur.push_back(quant);
+		 	break;
+
+		 }
+		}
+
+	}//for
+	if(!found){
+		cout<<"Item not available!"<<endl;
+	}
+	else if(!quantFound){
+		cout<<"Out of stock"<<endl;
+	}
+	else{
+		system("cls");
+		cout<<"Item | Price | quant | Amount"<<endl;
+		for(int i=0;i<itemPur.size();i++){
+			cout<<itemPur[i]<<"\t"<<pricePur[i]<<"\t"<<
+			quantPur[i]<<"\t"<<amountPur[i]<<endl;
+		}
+		cout<<"----------------------------"<<endl;
+		cout<<"Total Bill:.... "<<total<<endl;
+
+	}
+ }//while
+ cout<<" "<<endl;
 }
 
-string getItem(){
-return Item;
-}
+void quantFun(){
+	cout<<"Item  | Quantity"<<endl;
+	for(int i=0;i<nameVec.size();i++){
 
-int getRate(){
- return Rate;
-}
-
-int getQuant(){
- return Quantity;
-}
-
-};
-
-addItem(Bill b){
-bool close = false;
-while(!close){
-	int choice;
-cout<<"\t1.Add."<<endl;
-cout<<"\t2.close."<<endl;
-cout<<"\tEnter Choice: ";
-cin>>choice;
-
-if(choice==1){
-	system("cls");
-string item;
-int rate, quant;
-
-cout<<"\tEnter Item Name: ";
-cin>>item;
-b.setItem(item);
-
-cout<<"\tEnter Rate Of Item: ";
-cin>>rate;
-b.setRate(rate);
-
-cout<<"\tEnter Quantity Of Item: ";
-cin>>quant;
-b.setQuant(quant);
-
-ofstream out("D:/Bill.txt", ios::app);
-if(!out){
-	cout<<"\tError: File Can't Open!"<<endl;
-}
-else{
-out<<"\t"<<b.getItem()<<" : "<<b.getRate()<<" : "<<b.getQuant()<<endl<<endl;
-}
-out.close();
-cout<<"\tItem Added Successfuly"<<endl;
-Sleep(3000);
-}
-
-else if(choice == 2){
-	system("cls");
-close = true;
-cout<<"\tBack To Main Menu!"<<endl;
-Sleep(3000);
-}
-}
-}
-
-printBill(){
-	system("cls");
-int count = 0;
-bool close = false;
-while(!close){
-system("cls");
-int choice;
-cout<<"\t1.Add Bill."<<endl;
-cout<<"\t2.Close Session."<<endl;
-cout<<"\tEnter Choice: ";
-cin>>choice;
-
-if(choice==1){
-string item;
-int quant;
-cout<<"\tEnter Item: ";
-cin>>item;
-cout<<"\tEnter Quantity: ";
-cin>>quant;
-
-ifstream in("D:/Bill.txt");
-ofstream out("D:/Bill Temp.txt");
-
-string line;
-bool found = false;
-
-while(getline(in, line)){
-stringstream ss;
-ss<<line;
-string itemName;
-int itemRate, itemQuant;
-char delimiter;
-ss>>itemName>>delimiter>>itemRate>>delimiter>>itemQuant;
-
-if(item ==itemName){
-found = true;
-if(quant <= itemQuant){
-int amount = itemRate * quant;
-cout<<"\t Item | Rate | Quantity | Amount"<<endl;
-cout<<"\t"<<itemName<<"\t "<<itemRate<<"\t "<<quant<<"\t "<<amount<<endl;
-int newQuant = itemQuant - quant;
-itemQuant = newQuant;
-count +=amount;
-
-out<<"\t"<<itemName<<" : "<<itemRate<<" : "<<itemQuant<<endl;
-}
-else{
-cout<<"\tSorry, "<<item<<" Ended!"<<endl;
-}
-}
-else{
-out<<line<<endl;
-}	
-}
-if(!found){
-cout<<"\tItem Not Available!"<<endl;
-}
-out.close();
-in.close();
-remove("D:/Bill.txt");
-rename("D:/Bill Temp.txt", "D:/Bill.txt");
-}
-else if(choice ==2){
-close = true;
-cout<<"\tCounting Total Bill"<<endl;
-}
-Sleep(3000);
-}
-system("cls");
-cout<<endl<<endl;
-cout<<"\t Total Bill ----------------- : "<<count<<endl<<endl;
-cout<<"\tThanks For Shopping!"<<endl;
-Sleep(5000);
+		cout<<nameVec[i]<<"\t  "<<quantVec[i]<<endl;
+	}
+	cout<<" "<<endl;
 }
 
 int main(){
-Bill b;
+ while(true){
 
-bool exit = false;
-while(!exit){
-system("cls");
-int val;
+	cout<<"Super Market Billing System"<<endl;
+	cout<<"***************************"<<endl;
+	cout<<"1.Add Item In Store."<<endl;
+	cout<<"2.Purchase a Item."<<endl;
+	cout<<"3.Show Remaining Quantity."<<endl;
+	cout<<"4.Exit."<<endl;
+	cout<<"Enter Choice: ";
+	int choice;
+	cin>>choice;
 
-cout<<"\tWelcome To Super Market Billing System"<<endl;
-cout<<"\t**************************************"<<endl;
-cout<<"\t\t1.Add Item."<<endl;
-cout<<"\t\t2.Print Bill."<<endl;
-cout<<"\t\t3.Exit."<<endl;
-cout<<"\t\tEnter Choice: ";
-cin>>val;
+	if(choice==1){
+		//add item
+		system("cls");
+		addFun();
+	}
+	else if(choice==2){
+		//purchase item
+		system("cls");
+		purchaseFun();
+	}
+	else if(choice==3){
+		//show quantity
+		quantFun();
+	}
+	else if(choice==4){
+		cout<<"Best of Luck"<<endl;
+		break;
+	}
+	else{
+		cout<<"Invalid Input!"<<endl;
+	}
+	}
 
-if(val==1){
-system("cls");
-addItem(b);	
-Sleep(3000);
 }
 
-else if(val==2){
-printBill();
-}
-
-else if(val==3){
-	system("cls");
-exit = true;
-cout<<"\tGood Luck!"<<endl;
-Sleep(3000);
-}	
-}
-}
