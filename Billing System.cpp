@@ -699,4 +699,190 @@ int rank_gf2_32(uint32_t rows[32]) {
 
 
 
-31x31
+6x8
+    // diehard_rank6x8.cpp
+//
+// Diehard Binary Rank 6x8 test (original-style bucketing):
+//   Bucket A: rank = 6
+//   Bucket B: rank = 5
+//   Bucket C: rank <= 4
+//
+// INPUT  : output.dat  (TEXT file containing HEX BYTES, e.g. "0A FF 1c ...")
+// DEFAULT: M = 100000 matrices  (classic Diehard choice)
+// DATA   : 6 bytes per matrix  => total bytes needed = 6*M
+//
+// Expected probabilities (random bits):
+//   P(rank=6)  ≈ 0.773118
+//   P(rank=5)  ≈ 0.217439
+//   P(rank<=4) ≈ 0.009443
+//
+// Chi-square with 3 buckets => df = 2
+// For df=2, p-value = exp(-chi2/2)
+//
+// Compile:
+//   g++ -O3 -std=c++17 diehard_rank6x8.cpp -o diehard_rank6x8
+//
+// Run (reads output.dat, M=100000):
+//   ./diehard_rank6x8
+//
+// Run with custom file and/or M:
+//   ./diehard_rank6x8 output.dat 200000
+
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <fstream>
+#include <string>
+
+using namespace std;
+
+// Expected probabilities for rank buckets (6x8 over GF(2))
+static constexpr double P6   = 0.773118;
+static constexpr double P5   = 0.217439;
+static constexpr double PLE4 = 0.009443;
+
+// Read next hex byte token from stream (robust to separators, optional 0x prefix).
+static bool read_hex_byte(istream& in, uint8_t& outByte) {
+    string tok;
+    while (in >> tok) {
+        while (!tok.empty() && (tok.back() == ',' || tok.back() == ';' || tok.back() == ':'))
+            tok.pop_back();
+        if (tok.empty()) continue;
+
+        if (tok.size() >= 2 && tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X'))
+            tok = tok.substr(2);
+        if (tok.empty()) continue;
+
+        char* endp = nullptr;
+        long v = strtol(tok.c_str(), &endp, 16);
+        if (endp == tok.c_str() || *endp != '\0' || v < 0 || v > 255) continue;
+
+        outByte = static_cast<uint8_t>(v);
+        return true;
+    }
+    return false; // EOF
+}
+
+// Compute rank of a 6x8 binary matrix over GF(2).
+// Rows are 8-bit values, each bit is a column.
+// NOTE: modifies rows[] in-place.
+static int rank_gf2_6x8(uint8_t rows[6]) {
+    int rank = 0;
+
+    // Pivot columns from MSB->LSB (bit 7..0). LSB->MSB also works; rank is same.
+    for (int col = 7; col >= 0 && rank < 6; --col) {
+        uint8_t mask = static_cast<uint8_t>(1u << col);
+
+        // Find pivot row with a 1 in this column, among rows[rank..5]
+        int pivot = -1;
+        for (int r = rank; r < 6; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot < 0) continue;
+
+        // Swap pivot into position
+        if (pivot != rank) {
+            uint8_t tmp = rows[pivot];
+            rows[pivot] = rows[rank];
+            rows[rank]  = tmp;
+        }
+
+        // Eliminate this column from all other rows
+        for (int r = 0; r < 6; ++r) {
+            if (r != rank && (rows[r] & mask)) {
+                rows[r] ^= rows[rank];
+            }
+        }
+
+        ++rank;
+    }
+
+    return rank; // 0..6
+}
+
+int main(int argc, char** argv) {
+    string filename = "output.dat";
+    long long M_target = 100000; // classic Diehard choice for 6x8 rank
+
+    if (argc >= 2) filename = argv[1];
+    if (argc >= 3) M_target = atoll(argv[2]);
+
+    if (M_target <= 0) {
+        cerr << "Error: M must be positive.\n";
+        return 1;
+    }
+
+    ifstream fin(filename);
+    if (!fin) {
+        cerr << "Error: cannot open file '" << filename << "'\n";
+        return 1;
+    }
+
+    long long N6 = 0, N5 = 0, NLE4 = 0;
+    long long done = 0;
+
+    for (; done < M_target; ++done) {
+        uint8_t rows[6];
+
+        // One 6x8 matrix = 6 bytes = 6 rows of 8 bits
+        for (int r = 0; r < 6; ++r) {
+            if (!read_hex_byte(fin, rows[r])) {
+                cerr << "EOF: not enough hex bytes to complete matrix " << (done + 1) << "\n";
+                goto finished;
+            }
+        }
+
+        int rk = rank_gf2_6x8(rows);
+        if (rk == 6) ++N6;
+        else if (rk == 5) ++N5;
+        else ++NLE4;
+    }
+
+finished:
+    long long M = N6 + N5 + NLE4;
+    if (M == 0) {
+        cerr << "No matrices processed.\n";
+        return 1;
+    }
+
+    // Expected counts
+    double E6   = (double)M * P6;
+    double E5   = (double)M * P5;
+    double ELE4 = (double)M * PLE4;
+
+    // Chi-square (df=2)
+    double chi2 =
+        ((N6   - E6)   * (N6   - E6))   / E6 +
+        ((N5   - E5)   * (N5   - E5))   / E5 +
+        ((NLE4 - ELE4) * (NLE4 - ELE4)) / ELE4;
+
+    // df=2 => p = exp(-chi2/2)
+    double p = exp(-0.5 * chi2);
+
+    cout << "Binary Rank 6x8 (Diehard-style)\n";
+    cout << "Input file: " << filename << "\n";
+    cout << "Matrices processed M = " << M << "\n";
+    cout << "Data consumed (bytes) ~= " << (6LL * M) << "\n\n";
+
+    cout << "Observed counts:\n";
+    cout << "  N(rank=6)  = " << N6 << "\n";
+    cout << "  N(rank=5)  = " << N5 << "\n";
+    cout << "  N(rank<=4) = " << NLE4 << "\n\n";
+
+    cout << "Expected counts:\n";
+    cout << "  E6   = " << E6 << "\n";
+    cout << "  E5   = " << E5 << "\n";
+    cout << "  E<=4 = " << ELE4 << "\n\n";
+
+    cout << "chi^2 (df=2) = " << chi2 << "\n";
+    cout << "p-value      = " << p << "\n";
+
+    if (p < 1e-6 || p > 1.0 - 1e-6) {
+        cout << "WARNING: Extreme p-value (very close to 0 or 1) is suspicious.\n";
+    }
+
+    return 0;
+}
+
+    
