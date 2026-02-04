@@ -1,141 +1,702 @@
-// cnt1s_stream_bytes_outputdat.c
-// Diehard Count-the-1's test on a STREAM OF BYTES
-// Reads exactly 256004 bytes from file: output.dat
+32x32
+    // diehard_rank32.cpp
+//
+// Binary Rank 32x32 test (original Diehard style).
+// INPUT  : output.dat  (TEXT file containing HEX BYTES, e.g. "0A FF 1c ...")
+// OUTPUT : counts + chi-square + p-value
+//
+// Data need (original Diehard): 40,000 matrices × 128 bytes = 5,120,000 bytes (as hex-byte tokens)
+//
+// Compile:
+//   g++ -O3 -std=c++17 diehard_rank32.cpp -o diehard_rank32
+//
+// Run (reads output.dat by default):
+//   ./diehard_rank32
+//
+// Or specify file:
+//   ./diehard_rank32 output.dat
+//
+// If your 32-bit word byte-order is different, flip WORD_LITTLE_ENDIAN.
 
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <math.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <fstream>
+#include <string>
 
-static inline int popcount8(uint8_t x) {
-    int c = 0;
-    for (int i = 0; i < 8; ++i) c += (x >> i) & 1u;
-    return c;
-}
+using namespace std;
 
-// Return digit 0..4 corresponding to letters A..E
-// A:0-2 ones, B:3, C:4, D:5, E:6-8
-static inline uint8_t byte_to_letter(uint8_t b) {
-    int w = popcount8(b);
-    if (w <= 2) return 0;   // A
-    if (w == 3) return 1;   // B
-    if (w == 4) return 2;   // C
-    if (w == 5) return 3;   // D
-    return 4;               // E
-}
+static constexpr bool WORD_LITTLE_ENDIAN = true; // set false if your word order is big-endian
 
-static inline double Phi(double z) {
-    // Standard normal CDF
-    return 0.5 * (1.0 + erf(z / M_SQRT2));
-}
+// Diehard theoretical probabilities (32x32 GF(2) rank)
+static constexpr double P32   = 0.288788095;
+static constexpr double P31   = 0.577576190;
+static constexpr double PLE30 = 0.133635715;
 
-// Expected count for a cell index idx representing an L-letter base-5 word
-static double expected_count(int idx, int L, double N, const double prob[5]) {
-    double E = N;
-    for (int j = 0; j < L; ++j) {
-        int digit = idx % 5;
-        E *= prob[digit];
-        idx /= 5;
+// Read next hex byte token from stream (robust to separators, optional 0x prefix).
+static bool read_hex_byte(istream& in, uint8_t& outByte) {
+    string tok;
+    while (in >> tok) {
+        // strip trailing separators like "," ";" ":" etc.
+        while (!tok.empty() && (tok.back() == ',' || tok.back() == ';' || tok.back() == ':'))
+            tok.pop_back();
+        if (tok.empty()) continue;
+
+        // optional leading 0x
+        if (tok.size() >= 2 && tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+            tok = tok.substr(2);
+        }
+        if (tok.empty()) continue;
+
+        char* endp = nullptr;
+        long v = strtol(tok.c_str(), &endp, 16);
+        if (endp == tok.c_str() || *endp != '\0' || v < 0 || v > 255) {
+            // not a clean hex-byte token -> skip
+            continue;
+        }
+        outByte = static_cast<uint8_t>(v);
+        return true;
     }
-    return E;
+    return false; // EOF
 }
 
-// Encode 5 base-5 digits into [0..3124]
-static inline int code5(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint8_t e) {
-    return (((((int)a)*5 + (int)b)*5 + (int)c)*5 + (int)d)*5 + (int)e;
+static uint32_t bytes_to_u32(const uint8_t b[4]) {
+    if (WORD_LITTLE_ENDIAN) {
+        return (uint32_t)b[0]
+             | ((uint32_t)b[1] << 8)
+             | ((uint32_t)b[2] << 16)
+             | ((uint32_t)b[3] << 24);
+    } else {
+        return ((uint32_t)b[0] << 24)
+             | ((uint32_t)b[1] << 16)
+             | ((uint32_t)b[2] << 8)
+             | (uint32_t)b[3];
+    }
 }
 
-int main(void) {
-    const char *fn = "output.dat";
+// Rank of 32x32 binary matrix over GF(2), rows as uint32.
+static int gf2_rank_32(uint32_t rows[32]) {
+    int rank = 0;
 
-    // Classic size: 256004 bytes => N = 256000 overlapping 5-letter words
-    const size_t n_bytes = 256004;
-    const size_t N = n_bytes - 4;
+    // pivot columns from MSB->LSB (31..0)
+    for (int col = 31; col >= 0 && rank < 32; --col) {
+        uint32_t mask = (1u << col);
 
-    const double prob[5] = {
-        37.0/256.0, 56.0/256.0, 70.0/256.0, 56.0/256.0, 37.0/256.0
-    };
+        // find pivot row at/below 'rank'
+        int pivot = -1;
+        for (int r = rank; r < 32; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot < 0) continue;
 
-    const double mean = 2500.0;
-    const double stdv = sqrt(5000.0);
+        // swap pivot into position
+        if (pivot != rank) {
+            uint32_t tmp = rows[pivot];
+            rows[pivot] = rows[rank];
+            rows[rank] = tmp;
+        }
 
-    FILE *fp = fopen(fn, "rb");
-    if (!fp) {
-        perror("fopen output.dat");
+        // eliminate from all other rows
+        for (int r = 0; r < 32; ++r) {
+            if (r != rank && (rows[r] & mask)) {
+                rows[r] ^= rows[rank];
+            }
+        }
+
+        ++rank;
+    }
+    return rank;
+}
+
+int main(int argc, char** argv) {
+    // Default file name as requested
+    string filename = "output.dat";
+    if (argc >= 2) filename = argv[1];
+
+    ifstream fin(filename);
+    if (!fin) {
+        cerr << "Error: cannot open file '" << filename << "'\n";
         return 1;
     }
 
-    uint8_t *buf = (uint8_t*)malloc(n_bytes);
-    if (!buf) {
-        fprintf(stderr, "Out of memory.\n");
-        fclose(fp);
+    // Original Diehard uses 40,000 matrices for rank32 test
+    const int M_target = 40000;
+
+    long long N32 = 0, N31 = 0, NLE30 = 0;
+    int matrices_done = 0;
+
+    for (; matrices_done < M_target; ++matrices_done) {
+        uint32_t rows[32];
+
+        // build one 32x32 matrix from 128 bytes (32 words)
+        for (int r = 0; r < 32; ++r) {
+            uint8_t b[4];
+            for (int k = 0; k < 4; ++k) {
+                if (!read_hex_byte(fin, b[k])) {
+                    cerr << "EOF: not enough hex bytes to complete matrix " << (matrices_done + 1) << "\n";
+                    goto done;
+                }
+            }
+            rows[r] = bytes_to_u32(b);
+        }
+
+        int rank = gf2_rank_32(rows);
+        if (rank == 32) ++N32;
+        else if (rank == 31) ++N31;
+        else ++NLE30;
+    }
+
+done:
+    long long M = N32 + N31 + NLE30;
+    if (M == 0) {
+        cerr << "No matrices processed.\n";
         return 1;
     }
 
-    size_t got = fread(buf, 1, n_bytes, fp);
-    fclose(fp);
+    // Expected counts
+    double E32   = (double)M * P32;
+    double E31   = (double)M * P31;
+    double ELE30 = (double)M * PLE30;
 
-    if (got < n_bytes) {
-        fprintf(stderr, "File too short: need %zu bytes, got %zu.\n", n_bytes, got);
-        free(buf);
-        return 1;
+    // Chi-square (df=2)
+    double chi2 =
+        ((N32   - E32)   * (N32   - E32))   / E32 +
+        ((N31   - E31)   * (N31   - E31))   / E31 +
+        ((NLE30 - ELE30) * (NLE30 - ELE30)) / ELE30;
+
+    // For df=2, p-value = exp(-chi2/2)
+    double p_value = exp(-0.5 * chi2);
+
+    cout << "Binary Rank 32x32 (Diehard-style)\n";
+    cout << "Input file: " << filename << "\n";
+    cout << "Matrices processed M = " << M << "\n\n";
+
+    cout << "Observed counts:\n";
+    cout << "  N(rank=32)  = " << N32 << "\n";
+    cout << "  N(rank=31)  = " << N31 << "\n";
+    cout << "  N(rank<=30) = " << NLE30 << "\n\n";
+
+    cout << "Expected counts (Diehard):\n";
+    cout << "  E32   = " << E32 << "\n";
+    cout << "  E31   = " << E31 << "\n";
+    cout << "  E<=30 = " << ELE30 << "\n\n";
+
+    cout << "chi^2 (df=2) = " << chi2 << "\n";
+    cout << "p-value      = " << p_value << "\n";
+
+    if (p_value < 1e-6 || p_value > 1.0 - 1e-6) {
+        cout << "WARNING: Extreme p-value (very close to 0 or 1) is suspicious.\n";
     }
 
-    // Convert bytes -> letters (digits 0..4)
-    uint8_t *L = (uint8_t*)malloc(n_bytes);
-    if (!L) {
-        fprintf(stderr, "Out of memory.\n");
-        free(buf);
-        return 1;
-    }
+    // Practical hint about endianness
+    cout << "\nNote: WORD_LITTLE_ENDIAN = " << (WORD_LITTLE_ENDIAN ? "true" : "false") << "\n";
+    cout << "If results look unreasonable, flip WORD_LITTLE_ENDIAN and rerun.\n";
 
-    for (size_t i = 0; i < n_bytes; ++i) {
-        L[i] = byte_to_letter(buf[i]);
-    }
-
-    // Count 5-letter words and 4-letter suffix words
-    uint32_t f5[3125] = {0};
-    uint32_t f4[625]  = {0};
-
-    for (size_t i = 0; i < N; ++i) {
-        int w5 = code5(L[i], L[i+1], L[i+2], L[i+3], L[i+4]); // 0..3124
-        ++f5[w5];
-
-        int suffix4 = w5 % 625; // last 4 letters
-        ++f4[suffix4];
-    }
-
-    // Compute Q4 and Q5
-    double Q4 = 0.0, Q5 = 0.0;
-
-    for (int i = 0; i < 625; ++i) {
-        double E = expected_count(i, 4, (double)N, prob);
-        double diff = (double)f4[i] - E;
-        Q4 += (diff * diff) / E;
-    }
-
-    for (int i = 0; i < 3125; ++i) {
-        double E = expected_count(i, 5, (double)N, prob);
-        double diff = (double)f5[i] - E;
-        Q5 += (diff * diff) / E;
-    }
-
-    double stat = Q5 - Q4;
-    double z = (stat - mean) / stdv;
-    double p = 1.0 - Phi(z);
-
-    printf("COUNT-THE-1's TEST (stream of bytes)\n");
-    printf("File: %s\n", fn);
-    printf("Bytes read: %zu\n", n_bytes);
-    printf("Overlapping 5-letter words N = %zu\n", N);
-    printf("Degrees of freedom (5^4 - 5^3) = 2500 (Diehard Q5-Q4)\n\n");
-    printf("Q4      = %.6f\n", Q4);
-    printf("Q5      = %.6f\n", Q5);
-    printf("Q5 - Q4 = %.6f\n", stat);
-    printf("z-score = % .6f\n", z);
-    printf("p-value = %.10f\n", p);
-
-    free(L);
-    free(buf);
     return 0;
 }
+
+
+
+
+31x31
+    // diehard_rank31.cpp
+//
+// Binary Rank 31x31 test (original Diehard-style binning: 31, 30, 29, <=28).
+// INPUT  : output.dat  (TEXT file containing HEX BYTES, e.g. "0A FF 1c ...")
+// OUTPUT : counts + chi-square + p-value
+//
+// Matrix construction (Diehard style):
+// - Build 31 rows. Each row is taken from ONE 32-bit word but ONLY 31 bits are used.
+// - We mask the top bit off: row = word & 0x7FFFFFFF.
+//
+// Recommended M in classic Diehard is 40,000 matrices.
+//
+// Compile:
+//   g++ -O3 -std=c++17 diehard_rank31.cpp -o diehard_rank31
+//
+// Run (reads output.dat by default):
+//   ./diehard_rank31
+// Or:
+//   ./diehard_rank31 output.dat
+//
+// NOTE: If your 32-bit word byte-order is different, flip WORD_LITTLE_ENDIAN.
+
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <fstream>
+#include <string>
+
+using namespace std;
+
+static constexpr bool WORD_LITTLE_ENDIAN = true; // set false if your word order is big-endian
+
+// Diehard expected probabilities for 31x31 bins: rank 31, 30, 29, <=28
+// These correspond to expected counts for M=40000 shown in classic Diehard writeups.
+// E31=11551.5, E30=23103.0, E29=5134.0, E<=28=211.4
+static constexpr double P31   = 11551.5 / 40000.0;
+static constexpr double P30   = 23103.0 / 40000.0;
+static constexpr double P29   =  5134.0 / 40000.0;
+static constexpr double PLE28 =   211.4 / 40000.0;
+
+// Read next hex byte token from stream (robust to separators, optional 0x prefix).
+static bool read_hex_byte(istream& in, uint8_t& outByte) {
+    string tok;
+    while (in >> tok) {
+        while (!tok.empty() && (tok.back() == ',' || tok.back() == ';' || tok.back() == ':'))
+            tok.pop_back();
+        if (tok.empty()) continue;
+
+        if (tok.size() >= 2 && tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+            tok = tok.substr(2);
+        }
+        if (tok.empty()) continue;
+
+        char* endp = nullptr;
+        long v = strtol(tok.c_str(), &endp, 16);
+        if (endp == tok.c_str() || *endp != '\0' || v < 0 || v > 255) {
+            continue;
+        }
+        outByte = static_cast<uint8_t>(v);
+        return true;
+    }
+    return false;
+}
+
+static uint32_t bytes_to_u32(const uint8_t b[4]) {
+    if (WORD_LITTLE_ENDIAN) {
+        return (uint32_t)b[0]
+             | ((uint32_t)b[1] << 8)
+             | ((uint32_t)b[2] << 16)
+             | ((uint32_t)b[3] << 24);
+    } else {
+        return ((uint32_t)b[0] << 24)
+             | ((uint32_t)b[1] << 16)
+             | ((uint32_t)b[2] << 8)
+             | (uint32_t)b[3];
+    }
+}
+
+// Rank of 31x31 binary matrix over GF(2).
+// rows[0..30] each has only 31 active bits (bit 30..0). Bit 31 is 0.
+// NOTE: modifies rows in-place.
+static int gf2_rank_31(uint32_t rows[31]) {
+    int rank = 0;
+
+    // pivot from bit 30 down to bit 0 (31 columns)
+    for (int col = 30; col >= 0 && rank < 31; --col) {
+        uint32_t mask = (1u << col);
+
+        int pivot = -1;
+        for (int r = rank; r < 31; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot < 0) continue;
+
+        if (pivot != rank) {
+            uint32_t tmp = rows[pivot];
+            rows[pivot] = rows[rank];
+            rows[rank] = tmp;
+        }
+
+        for (int r = 0; r < 31; ++r) {
+            if (r != rank && (rows[r] & mask)) {
+                rows[r] ^= rows[rank];
+            }
+        }
+
+        ++rank;
+    }
+
+    return rank;
+}
+
+int main(int argc, char** argv) {
+    string filename = "output.dat";
+    if (argc >= 2) filename = argv[1];
+
+    ifstream fin(filename);
+    if (!fin) {
+        cerr << "Error: cannot open file '" << filename << "'\n";
+        return 1;
+    }
+
+    const int M_target = 40000;
+
+    long long N31 = 0, N30 = 0, N29 = 0, NLE28 = 0;
+    int matrices_done = 0;
+
+    for (; matrices_done < M_target; ++matrices_done) {
+        uint32_t rows[31];
+
+        // For each row: read one 32-bit word (4 bytes) then keep only 31 bits
+        for (int r = 0; r < 31; ++r) {
+            uint8_t b[4];
+            for (int k = 0; k < 4; ++k) {
+                if (!read_hex_byte(fin, b[k])) {
+                    cerr << "EOF: not enough hex bytes to complete matrix " << (matrices_done + 1) << "\n";
+                    goto done;
+                }
+            }
+            uint32_t w = bytes_to_u32(b);
+            rows[r] = (w & 0x7FFFFFFFu); // keep only 31 bits
+        }
+
+        int rank = gf2_rank_31(rows);
+        if (rank == 31) ++N31;
+        else if (rank == 30) ++N30;
+        else if (rank == 29) ++N29;
+        else ++NLE28;
+    }
+
+done:
+    long long M = N31 + N30 + N29 + NLE28;
+    if (M == 0) {
+        cerr << "No matrices processed.\n";
+        return 1;
+    }
+
+    // Expected counts
+    double E31   = (double)M * P31;
+    double E30   = (double)M * P30;
+    double E29   = (double)M * P29;
+    double ELE28 = (double)M * PLE28;
+
+    // Chi-square (4 bins => df=3)
+    double chi2 =
+        ((N31   - E31)   * (N31   - E31))   / E31 +
+        ((N30   - E30)   * (N30   - E30))   / E30 +
+        ((N29   - E29)   * (N29   - E29))   / E29 +
+        ((NLE28 - ELE28) * (NLE28 - ELE28)) / ELE28;
+
+    // p-value for chi-square(df=3): use survival function via incomplete gamma.
+    // We'll use a simple approximation by calling std::erfc for df=1/2 only is not enough.
+    // Instead, we compute p-value using regularized gamma Q(k/2, chi2/2) with k=3.
+    //
+    // For df=3, Q(1.5, x) has a closed form:
+    //   Q(3/2, x) = erfc(sqrt(x)) + (2/sqrt(pi)) * sqrt(x) * exp(-x)
+    //
+    double x = 0.5 * chi2;                // x = chi2/2
+    double sx = sqrt(x);
+    double p_value = erfc(sx) + (2.0 / sqrt(M_PI)) * sx * exp(-x);
+
+    cout << "Binary Rank 31x31 (Diehard-style)\n";
+    cout << "Input file: " << filename << "\n";
+    cout << "Matrices processed M = " << M << "\n\n";
+
+    cout << "Observed counts:\n";
+    cout << "  N(rank=31)  = " << N31 << "\n";
+    cout << "  N(rank=30)  = " << N30 << "\n";
+    cout << "  N(rank=29)  = " << N29 << "\n";
+    cout << "  N(rank<=28) = " << NLE28 << "\n\n";
+
+    cout << "Expected counts (Diehard):\n";
+    cout << "  E31   = " << E31 << "\n";
+    cout << "  E30   = " << E30 << "\n";
+    cout << "  E29   = " << E29 << "\n";
+    cout << "  E<=28 = " << ELE28 << "\n\n";
+
+    cout << "chi^2 (df=3) = " << chi2 << "\n";
+    cout << "p-value      = " << p_value << "\n";
+
+    if (p_value < 1e-6 || p_value > 1.0 - 1e-6) {
+        cout << "WARNING: Extreme p-value (very close to 0 or 1) is suspicious.\n";
+    }
+
+    cout << "\nNote: WORD_LITTLE_ENDIAN = " << (WORD_LITTLE_ENDIAN ? "true" : "false") << "\n";
+    cout << "If results look unreasonable, flip WORD_LITTLE_ENDIAN and rerun.\n";
+
+    return 0;
+}
+32x32
+    // diehard_rank32.cpp
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <fstream>
+#include <string>
+using namespace std;
+
+static constexpr bool WORD_LITTLE_ENDIAN = true;
+
+// Diehard probabilities for 32x32: bins 32, 31, <=30
+static constexpr double P32   = 0.288788095;
+static constexpr double P31   = 0.577576190;
+static constexpr double PLE30 = 0.133635715;
+
+static bool read_hex_byte(istream& in, uint8_t& outByte) {
+    string tok;
+    while (in >> tok) {
+        while (!tok.empty() && (tok.back()==',' || tok.back()==';' || tok.back()==':'))
+            tok.pop_back();
+        if (tok.empty()) continue;
+        if (tok.size() >= 2 && tok[0]=='0' && (tok[1]=='x' || tok[1]=='X'))
+            tok = tok.substr(2);
+        if (tok.empty()) continue;
+
+        char* endp = nullptr;
+        long v = strtol(tok.c_str(), &endp, 16);
+        if (endp == tok.c_str() || *endp != '\0' || v < 0 || v > 255) continue;
+        outByte = (uint8_t)v;
+        return true;
+    }
+    return false;
+}
+
+static uint32_t bytes_to_u32(const uint8_t b[4]) {
+    if (WORD_LITTLE_ENDIAN) {
+        return (uint32_t)b[0] | ((uint32_t)b[1]<<8) | ((uint32_t)b[2]<<16) | ((uint32_t)b[3]<<24);
+    } else {
+        return ((uint32_t)b[0]<<24) | ((uint32_t)b[1]<<16) | ((uint32_t)b[2]<<8) | (uint32_t)b[3];
+    }
+}
+
+static int rank_gf2_32(uint32_t rows[32]) {
+    int rank = 0;
+    for (int col = 31; col >= 0 && rank < 32; --col) {
+        uint32_t mask = (1u << col);
+
+        int pivot = -1;
+        for (int r = rank; r < 32; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot < 0) continue;
+
+        if (pivot != rank) swap(rows[pivot], rows[rank]);
+
+        for (int r = 0; r < 32; ++r) {
+            if (r != rank && (rows[r] & mask)) rows[r] ^= rows[rank];
+        }
+        ++rank;
+    }
+    return rank;
+}
+
+int main(int argc, char** argv) {
+    string filename = "output.dat";
+    if (argc >= 2) filename = argv[1];
+
+    ifstream fin(filename);
+    if (!fin) { cerr << "Cannot open " << filename << "\n"; return 1; }
+
+    const int M_target = 40000;
+    long long N32=0, N31=0, NLE30=0;
+
+    for (int m=0; m<M_target; ++m) {
+        uint32_t rows[32];
+        for (int r=0; r<32; ++r) {
+            uint8_t b[4];
+            for (int k=0; k<4; ++k) {
+                if (!read_hex_byte(fin, b[k])) {
+                    cerr << "EOF before completing matrix " << (m+1) << "\n";
+                    goto done;
+                }
+            }
+            rows[r] = bytes_to_u32(b);
+        }
+
+        int rk = rank_gf2_32(rows);
+        if (rk==32) ++N32;
+        else if (rk==31) ++N31;
+        else ++NLE30;
+    }
+
+done:
+    long long M = N32 + N31 + NLE30;
+    if (M==0) { cerr << "No matrices processed.\n"; return 1; }
+
+    double E32 = M*P32, E31 = M*P31, ELE30 = M*PLE30;
+    double chi2 =
+        ((N32-E32)*(N32-E32))/E32 +
+        ((N31-E31)*(N31-E31))/E31 +
+        ((NLE30-ELE30)*(NLE30-ELE30))/ELE30;
+
+    double p = exp(-0.5*chi2); // df=2
+
+    cout << "Binary Rank 32x32 (Diehard)\n";
+    cout << "M=" << M << "\n";
+    cout << "N32=" << N32 << "  N31=" << N31 << "  N<=30=" << NLE30 << "\n";
+    cout << "E32=" << E32 << "  E31=" << E31 << "  E<=30=" << ELE30 << "\n";
+    cout << "chi2(df=2)=" << chi2 << "  p=" << p << "\n";
+    return 0;
+}
+31x31
+    // diehard_rank31.cpp
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <fstream>
+#include <string>
+using namespace std;
+
+static constexpr bool WORD_LITTLE_ENDIAN = true;
+
+// Expected counts (classic Diehard) for M=40000:
+static constexpr double P31   = 11551.5 / 40000.0;
+static constexpr double P30   = 23103.0 / 40000.0;
+static constexpr double P29   =  5134.0 / 40000.0;
+static constexpr double PLE28 =   211.4 / 40000.0;
+
+static bool read_hex_byte(istream& in, uint8_t& outByte) {
+    string tok;
+    while (in >> tok) {
+        while (!tok.empty() && (tok.back()==',' || tok.back()==';' || tok.back()==':'))
+            tok.pop_back();
+        if (tok.empty()) continue;
+        if (tok.size() >= 2 && tok[0]=='0' && (tok[1]=='x' || tok[1]=='X'))
+            tok = tok.substr(2);
+        if (tok.empty()) continue;
+
+        char* endp = nullptr;
+        long v = strtol(tok.c_str(), &endp, 16);
+        if (endp == tok.c_str() || *endp != '\0' || v < 0 || v > 255) continue;
+        outByte = (uint8_t)v;
+        return true;
+    }
+    return false;
+}
+
+static uint32_t bytes_to_u32(const uint8_t b[4]) {
+    if (WORD_LITTLE_ENDIAN) {
+        return (uint32_t)b[0] | ((uint32_t)b[1]<<8) | ((uint32_t)b[2]<<16) | ((uint32_t)b[3]<<24);
+    } else {
+        return ((uint32_t)b[0]<<24) | ((uint32_t)b[1]<<16) | ((uint32_t)b[2]<<8) | (uint32_t)b[3];
+    }
+}
+
+static int rank_gf2_31(uint32_t rows[31]) {
+    int rank = 0;
+    for (int col = 30; col >= 0 && rank < 31; --col) {
+        uint32_t mask = (1u << col);
+
+        int pivot = -1;
+        for (int r = rank; r < 31; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot < 0) continue;
+
+        if (pivot != rank) swap(rows[pivot], rows[rank]);
+
+        for (int r = 0; r < 31; ++r) {
+            if (r != rank && (rows[r] & mask)) rows[r] ^= rows[rank];
+        }
+        ++rank;
+    }
+    return rank;
+}
+
+int main(int argc, char** argv) {
+    string filename = "output.dat";
+    if (argc >= 2) filename = argv[1];
+
+    ifstream fin(filename);
+    if (!fin) { cerr << "Cannot open " << filename << "\n"; return 1; }
+
+    const int M_target = 40000;
+    long long N31=0, N30=0, N29=0, NLE28=0;
+
+    for (int m=0; m<M_target; ++m) {
+        uint32_t rows[31];
+
+        // Each row from one 32-bit word, keep 31 LSBs
+        for (int r=0; r<31; ++r) {
+            uint8_t b[4];
+            for (int k=0; k<4; ++k) {
+                if (!read_hex_byte(fin, b[k])) {
+                    cerr << "EOF before completing matrix " << (m+1) << "\n";
+                    goto done;
+                }
+            }
+            uint32_t w = bytes_to_u32(b);
+            rows[r] = (w & 0x7FFFFFFFu); // 31 LSBs
+        }
+
+        int rk = rank_gf2_31(rows);
+        if (rk==31) ++N31;
+        else if (rk==30) ++N30;
+        else if (rk==29) ++N29;
+        else ++NLE28;
+    }
+
+done:
+    long long M = N31 + N30 + N29 + NLE28;
+    if (M==0) { cerr << "No matrices processed.\n"; return 1; }
+
+    double E31 = M*P31, E30 = M*P30, E29 = M*P29, ELE28 = M*PLE28;
+
+    double chi2 =
+        ((N31-E31)*(N31-E31))/E31 +
+        ((N30-E30)*(N30-E30))/E30 +
+        ((N29-E29)*(N29-E29))/E29 +
+        ((NLE28-ELE28)*(NLE28-ELE28))/ELE28;
+
+    // df=3 p-value (closed form): p = erfc(sqrt(x)) + (2/sqrt(pi))*sqrt(x)*exp(-x), x=chi2/2
+    double x = 0.5*chi2;
+    double sx = sqrt(x);
+    double p = erfc(sx) + (2.0/sqrt(M_PI))*sx*exp(-x);
+
+    cout << "Binary Rank 31x31 (Diehard)\n";
+    cout << "M=" << M << "\n";
+    cout << "N31=" << N31 << "  N30=" << N30 << "  N29=" << N29 << "  N<=28=" << NLE28 << "\n";
+    cout << "E31=" << E31 << "  E30=" << E30 << "  E29=" << E29 << "  E<=28=" << ELE28 << "\n";
+    cout << "chi2(df=3)=" << chi2 << "  p=" << p << "\n";
+    return 0;
+}
+
+snippet code
+// GF(2) rank of a 32x32 binary matrix.
+// Represent the matrix as 32 rows, each row packed into a uint32_t.
+// Bit operations are over GF(2): elimination uses XOR.
+//
+// rank = number of pivots found (0..32).
+//
+// Usage:
+//   uint32_t rows[32] = {...};   // fill with your 32 words
+//   int r = rank_gf2_32(rows);   // NOTE: modifies rows in-place
+//
+#include <cstdint>
+using namespace std;
+
+int rank_gf2_32(uint32_t rows[32]) {
+    int rank = 0;
+
+    // Pivot from MSB (bit 31) down to LSB (bit 0)
+    for (int col = 31; col >= 0 && rank < 32; --col) {
+        uint32_t mask = (1u << col);
+
+        // 1) Find pivot row at/below current rank with a 1 in this column
+        int pivot = -1;
+        for (int r = rank; r < 32; ++r) {
+            if (rows[r] & mask) { pivot = r; break; }
+        }
+        if (pivot == -1) continue; // no pivot in this column
+
+        // 2) Swap pivot row into position "rank"
+        if (pivot != rank) {
+            uint32_t tmp = rows[pivot];
+            rows[pivot] = rows[rank];
+            rows[rank]  = tmp;
+        }
+
+        // 3) Eliminate this column from all other rows
+        for (int r = 0; r < 32; ++r) {
+            if (r != rank && (rows[r] & mask)) {
+                rows[r] ^= rows[rank];
+            }
+        }
+
+        // 4) One pivot found
+        ++rank;
+    }
+
+    return rank;
+}
+
+
+
+
+31x31
